@@ -36,20 +36,21 @@ Tangram 结果中，`Oligodendrocyte` 的高分区域主要位于 WM，`L2/3 IT`
 
 ## 目录结构
 
+## 目录结构
+
 ```text
 .
-├── data/
-│   ├── 151673/
-│   ├── processed/
-│   └── snrna_ref/
+├── docs/
+│   ├── DLPFC_spatial_report_zh.html
+│   └── DLPFC_spatial_report_en.html
 ├── notebooks/
+├── qmd/
+│   ├── DLPFC_spatial_report_zh.qmd
+│   └── DLPFC_spatial_report_en.qmd
 ├── results/
 │   ├── figures/
 │   └── tables/
-├── docs/
-│   ├── report_zh.html
-│   └── report_en.html
-├── DLPFC_spatial_report.qmd
+├── scripts/
 ├── environment.yml
 └── README.md
 ```
