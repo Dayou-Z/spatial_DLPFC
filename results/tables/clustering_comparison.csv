@@ -1,0 +1,4 @@
+Method,ARI,NMI,Uses Spatial,Uses Histology
+Leiden,0.3882,0.5009,False,False
+SpaGCN,0.3163,0.4593,True,True
+BayesSpace,0.5355,0.6729,True,False

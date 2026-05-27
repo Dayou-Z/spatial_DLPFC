@@ -1,0 +1,347 @@
+---
+title: "Human DLPFC Visium Spatial Transcriptomics Analysis"
+author: "Dayou Zou"
+date: "2026-05-26"
+lang: en
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    fig-width: 10
+    fig-height: 7
+    theme: cosmo
+    smooth-scroll: true
+    embed-resources: true
+    lightbox: true
+execute:
+  enabled: false
+---
+
+```{=html}
+<style>
+table { font-size: 0.92em; }
+figcaption, .figure-caption {
+  font-size: 0.88em;
+  color: #555;
+  margin-top: 6px;
+}
+.quarto-figure img,
+p > img {
+  cursor: zoom-in;
+}
+</style>
+```
+
+## Introduction
+
+### Data Background
+
+The human dorsolateral prefrontal cortex (DLPFC) exhibits well-defined cortical laminar architecture. 10x Visium spatial transcriptomics measures spot-level RNA expression while preserving tissue spatial coordinates, making it suitable for examining spatial expression patterns, cortical layer-associated markers, and the ability of different spatial clustering methods to identify laminar structure.
+
+This project uses the human DLPFC Visium dataset published by Maynard et al., with sample 151673 as the analysis target. This sample includes manual annotations for Layer1–Layer6 and white matter (WM), and thus serves as a small-scale benchmark for comparing unsupervised clustering results against expert layer annotations.
+
+### Project Objectives
+
+This project focuses on analytical workflow and method comparison, covering five parts:
+
+- QC, normalization, HVG selection, PCA, and expression graph construction on the spot-level expression matrix;
+- Identification of spatially variable genes using Moran's I, and examination of known cortical/WM marker spatial distributions;
+- Comparison of Leiden, SpaGCN, and BayesSpace clustering results against manual layer annotations;
+- Estimation of major cell type spatial trends via Tangram deconvolution using human MTG snRNA-seq as reference;
+- Examination of spatial neighborhood relationships using neighborhood enrichment, co-occurrence, and Ripley's L.
+
+Manual layer annotations are not used in unsupervised clustering model fitting and serve primarily for downstream evaluation of method consistency with cortical laminar structure. The settings for Leiden resolution, SpaGCN `n_clusters`, and BayesSpace `q` reference the 7 expert-annotated regions; therefore, the clustering comparison in this report should be understood as a benchmark near a fixed target cluster count, rather than fully unconstrained model selection.
+
+### Data Overview
+
+This analysis uses the publicly available Space Ranger output matrix and corresponding manual layer annotations for sample 151673. After initial loading, the data contains 3,639 spots and 33,538 genes; 3,611 spots carry manual layer annotations. After removing spots without layer annotations, Layer1–Layer6 and WM are all retained in the analysis.
+
+| Region | Spot count |
+|---|---:|
+| Layer1 | 273 |
+| Layer2 | 253 |
+| Layer3 | 989 |
+| Layer4 | 218 |
+| Layer5 | 673 |
+| Layer6 | 692 |
+| WM | 513 |
+| Total | **3,611** |
+
+: Spot composition by manual layer annotation {#tbl-layer-counts}
+
+---
+
+## Quality Control
+
+Quality control is performed at the spot level, examining `total_counts`, `n_genes_by_counts`, and `pct_counts_mt`. Before filtering, the number of spots with manual layer annotations is 3,611. Filtering criteria are `min_counts >= 500`, `min_genes >= 200`, and `pct_counts_mt < 30`; genes detected in fewer than 10 spots are also removed. After filtering, 3,601 spots and 16,567 genes are retained.
+
+![Spatial distribution of main QC metrics](results/figures/02_B_qc.png){#fig-qc width="100%"}
+
+@fig-qc shows the spatial distribution of three main QC metrics. Gray matter regions generally display higher UMI counts and detected gene numbers; `pct_counts_mt` does not show obvious localized elevation. This project does not use multi-sample or external QC controls, so the QC results here serve only as basic filtering criteria for downstream analysis.
+
+| Stage | Spots | Genes |
+|---|---:|---:|
+| Initial loading | 3,639 | 33,538 |
+| With manual annotation | 3,611 | 33,538 |
+| After QC | **3,601** | **16,567** |
+
+: Data dimensions before and after QC {#tbl-qc}
+
+![Manual layer annotation](results/figures/01_ground_truth.png){#fig-ground-truth width="75%"}
+
+@fig-ground-truth shows the manual layer annotation for sample 151673. This annotation is used for downstream clustering evaluation and does not serve as training labels for Leiden, SpaGCN, or BayesSpace.
+
+---
+
+## Spatial Expression Structure
+
+### Preprocessing and Expression Clustering Baseline
+
+The post-QC matrix is library size normalized with `target_sum=10,000` and `log1p` transformed. HVG selection uses the `seurat_v3` method, retaining 3,000 highly variable genes. PCA is computed on HVGs with 50 components; the downstream kNN graph uses the first 17 PCs.
+
+Leiden clustering serves as an expression clustering baseline that does not explicitly use spatial coordinates. This baseline is used for comparison with spatial methods such as SpaGCN and BayesSpace, rather than as a final layer annotation result.
+
+| Step | Setting |
+|---|---|
+| Normalization | `target_sum=10,000` |
+| Transformation | `log1p` |
+| HVG | `seurat_v3`, `n_top_genes=3,000` |
+| PCA | 50 PCs |
+| kNN graph | `n_neighbors=15`, `n_pcs=17` |
+| Leiden baseline | `resolution=0.62` |
+
+: Preprocessing and expression clustering parameters {#tbl-preprocessing}
+
+### Spatially Variable Genes
+
+Moran's I is computed on 3,000 HVGs and ranked in descending order. Moran's I measures the spatial autocorrelation of expression values; higher values indicate that the gene tends to form local spatial clusters. Statistical significance is estimated via 100 permutations.
+
+![Top 10 spatially variable genes](results/figures/03_top10_svgs.png){#fig-top-svgs width="100%"}
+
+@fig-top-svgs shows the top 10 spatially variable genes ranked by Moran's I. `MBP`, `PLP1`, `MOBP`, `MAG`, and other myelin/oligodendrocyte/WM-related genes rank high, suggesting that WM-related expression signal is one of the stronger spatial patterns in this sample. These results indicate spatial clustering trends of RNA expression only, and cannot be directly interpreted as functional enhancement, loss of function, or changes in regulatory mechanisms.
+
+| Gene | Moran's I | FDR |
+|---|---:|---:|
+| `MBP` | 0.8075 | <0.0001 |
+| `PLP1` | 0.7019 | <0.0001 |
+| `SCGB2A2` | 0.7017 | <0.0001 |
+| `MOBP` | 0.6461 | <0.0001 |
+| `GFAP` | 0.6246 | <0.0001 |
+| `TF` | 0.5927 | <0.0001 |
+| `CNP` | 0.5717 | <0.0001 |
+| `CRYAB` | 0.5613 | <0.0001 |
+| `MAG` | 0.5459 | <0.0001 |
+| `PPP1R14A` | 0.5334 | <0.0001 |
+
+: Top 10 genes ranked by Moran's I {#tbl-top-svg}
+
+
+### Known Marker Examination
+
+To check whether spatial expression results are consistent with known anatomical directions, this project examines several commonly used markers. This examination serves as a sanity check and does not constitute independent validation.
+
+![Known marker expression](results/figures/04_known_markers.png){#fig-known-markers width="100%"}
+
+@fig-known-markers shows the spatial expression of 5 reference markers. `MBP` and `MOBP` high-expression regions are mainly located in WM; `SNAP25` is primarily distributed in cortical gray matter. `PCP4` shows some expression near Layer5, but its spatial autocorrelation strength is lower than the top WM markers. `RELN` ranks low in Moran's I in this analysis.
+
+| Marker | Reference direction | Spatial expression observation | Moran's I rank |
+|---|---|---|---:|
+| `MBP` | WM / myelin / oligodendrocyte-related | Stronger signal in WM region | 1 |
+| `MOBP` | WM / myelin / oligodendrocyte-related | Stronger signal in WM region | 4 |
+| `SNAP25` | Neuron / gray matter-related | Stronger signal in gray matter | 20 |
+| `PCP4` | Layer5-related | Some Layer5-associated trend | 67 |
+| `RELN` | Layer1-related | Weak spatial autocorrelation | 399 |
+
+: Known marker spatial expression examination {#tbl-known-markers}
+
+---
+
+## Spatial Clustering Method Comparison
+
+### Comparison Rationale
+
+This project compares three unsupervised clustering approaches: Leiden uses only expression PCA/kNN graph; SpaGCN incorporates spatial coordinates and H&E image in addition to expression; BayesSpace uses expression PCA and Visium spot adjacency structure. Clustering results do not use manual layer annotations for training or fitting. Manual layer annotations serve only as reference labels for computing ARI and NMI.
+
+| Method | Input information | Parameter settings | Role in this analysis |
+|---|---|---|---|
+| Leiden | Expression PCA/kNN graph | `resolution=0.62` | Baseline without spatial information |
+| SpaGCN | Expression, spatial coordinates, H&E image | `beta=49`, `n_clusters=7` | Spatial graph model |
+| BayesSpace | Expression PCA and Visium adjacency structure | `q=7`, `gamma=2`, `nrep=50,000` | Spatial prior model |
+
+: Clustering method settings {#tbl-clustering-methods}
+
+### Spatial Distribution Comparison
+
+![Spatial clustering result comparison](results/figures/05_clustering.png){#fig-clustering width="85%"}
+
+@fig-clustering compares the spatial distributions of manual layer annotations, Leiden, SpaGCN, and BayesSpace. BayesSpace preserves relatively clear locally continuous structure in this sample; Leiden primarily reflects expression similarity with weaker local spatial continuity; SpaGCN under the current parameters also does not surpass Leiden.
+
+### Quantitative Evaluation
+
+| Method | ARI | NMI |
+|---|---:|---:|
+| Leiden | 0.3882 | 0.5009 |
+| SpaGCN | 0.3163 | 0.4593 |
+| BayesSpace | **0.5355** | **0.6729** |
+
+: Clustering consistency with manual layer annotations {#tbl-clustering-scores}
+
+For sample 151673 under the current parameter settings, BayesSpace achieves the highest ARI/NMI. This result supports the utility of spatial priors in laminar structure identification for this sample. SpaGCN falls below Leiden under the current settings, possibly due to parameter selection, H&E information utilization, or smoothing effects; this report does not perform further validation and therefore does not generalize this result to a conclusion about method superiority.
+
+---
+
+## Reference Mapping and Cell Type Spatial Trends
+
+### Reference Data and Tangram Settings
+
+Tangram reference mapping uses human MTG snRNA-seq data. The reference data is subsampled by `subclass_label`, yielding 10,743 nuclei covering 24 subclasses. This reference contains major cortical neuronal and glial cell types; since the reference comes from MTG while the spatial data comes from DLPFC, regional differences may affect the interpretation of some cell type scores.
+
+Tangram is run in `mode='clusters'` with 1,279 marker genes, density prior set to `rna_count_based`, and trained for 500 epochs. This report interprets Tangram output as relative spatial trends of cell type scores, not as direct cell counts.
+
+| Item | Setting |
+|---|---|
+| Reference data | Human MTG snRNA-seq |
+| Annotation column | `subclass_label` |
+| Reference size | 10,743 nuclei |
+| Subclass count | 24 |
+| Training genes | 1,279 marker genes |
+| Tangram mode | `clusters` |
+| Density prior | `rna_count_based` |
+| Epochs | 500 |
+
+: Tangram reference mapping settings {#tbl-tangram-params}
+
+### Tangram Spatial Trends
+
+![Tangram cell type score maps](results/figures/06_deconvolution.png){#fig-tangram-map width="85%"}
+
+@fig-tangram-map shows the spatial distribution of 4 cell type scores. The `Oligodendrocyte` high-score region is mainly located in WM, and the `L2/3 IT` high-score region is mainly in superficial cortical layers. `L5 ET` shows distribution near middle layers but does not present a clear Layer5-specific pattern; `Astrocyte` distribution is relatively diffuse.
+
+### Summary by Expert Layer Annotation
+
+![Tangram scores summarized by expert layer annotation](results/figures/07_tangram_ct_by_layer_boxplot.png){#fig-tangram-box width="90%"}
+
+@fig-tangram-box summarizes 4 cell type scores by manual layer annotation. `Oligodendrocyte` is highest in WM; `L2/3 IT` is higher in Layer2 and Layer3. `L5 ET` shows distribution across Layer3, Layer4, and Layer5, and therefore is not described as clearly Layer5-specific enrichment.
+
+| Cell type | Layer distribution | Interpretation scope |
+|---|---|---|
+| `Oligodendrocyte` | Highest in WM | Consistent with WM-related signal |
+| `L2/3 IT` | Higher in Layer2 and Layer3 | Consistent with superficial excitatory neuron distribution |
+| `L5 ET` | Distributed across Layer3, Layer4, and Layer5 | Not described as clear Layer5-specific enrichment |
+| `Astrocyte` | Small differences across layers | Not interpreted as layer-specific result |
+
+: Tangram cell type score layer distribution {#tbl-tangram-interpretation}
+
+---
+
+## Spatial Neighborhood Analysis
+
+### Neighborhood Enrichment
+
+Neighborhood enrichment examines whether different regions or clusters tend to be spatially connected to themselves or adjacent regions. Here it is computed separately for manual layer annotations and BayesSpace clusters.
+
+::: {layout-ncol=2}
+
+![Ground truth neighborhood enrichment](results/figures/08_nhood_enrichment_gt.png){#fig-nhood-gt width="100%"}
+
+![BayesSpace neighborhood enrichment](results/figures/09_nhood_enrichment_bs.png){#fig-nhood-bs width="100%"}
+
+:::
+
+@fig-nhood-gt and @fig-nhood-bs show that both manual layer annotations and BayesSpace clusters exhibit local continuity. This result can serve as a spatial structure check but cannot alone be used to determine whether BayesSpace accurately recovers inter-layer boundaries.
+
+### Co-occurrence and Ripley's L
+
+Co-occurrence analysis is used to observe the co-occurrence trends of specified layers at different distance scales. This project examines Layer1, Layer3, Layer5, and WM.
+
+::: {layout-ncol=2}
+
+![Layer1 co-occurrence](results/figures/co_occurrence_Layer1.png){.lightbox group="cooc" width="100%"}
+
+![Layer3 co-occurrence](results/figures/co_occurrence_Layer3.png){.lightbox group="cooc" width="100%"}
+
+![Layer5 co-occurrence](results/figures/co_occurrence_Layer5.png){.lightbox group="cooc" width="100%"}
+
+![WM co-occurrence](results/figures/co_occurrence_WM.png){.lightbox group="cooc" width="100%"}
+
+:::
+
+These plots serve as supplementary checks of the spatial organization of layer annotations. No additional statistical tests are performed on the co-occurrence curves or Ripley's L here, so they are used as descriptive results only.
+
+![Ripley's L curves](results/figures/10_ripley_L.png){#fig-ripley width="80%"}
+
+@fig-ripley shows the Ripley's L curves for different layer annotations at various distance scales. Curve differences are used primarily to observe spatial clustering and range differences across layers, and are not used alone as a criterion for clustering accuracy.
+
+---
+
+## Discussion
+
+### Main Observations
+
+This project starts from 3,611 spots with manual layer annotations and retains 3,601 spots and 16,567 genes after QC. Spatially variable gene analysis shows that `MBP`, `PLP1`, `MOBP`, `MAG`, and other WM/oligodendrocyte-related genes rank high in Moran's I, suggesting that the expression difference between WM and gray matter is one of the stronger spatial signals in this sample.
+
+### Method-Level Results
+
+Under sample 151673, the current parameters, and ARI/NMI metrics, BayesSpace achieves the highest consistency with manual layer annotations (ARI = 0.5355, NMI = 0.6729). This result supports the utility of spatial priors in laminar structure identification for this sample.
+
+In Tangram reference mapping, the `Oligodendrocyte` high-score region is mainly located in WM, and the `L2/3 IT` high-score region is mainly in superficial cortical layers. Since Tangram output consists of relative scores derived from reference mapping, it cannot be interpreted as true cell proportions or functional mechanisms.
+
+### Limitations
+
+This project is a single-sample, public-data, parameter-specific analysis. Clustering method comparison uses manual layer annotations as reference labels and sets the target cluster count near 7 expert-annotated regions; therefore, results should not be generalized to all DLPFC samples or all spatial clustering tasks.
+
+RNA-level expression trends, Tangram mapping, and neighborhood analyses are all computational-level evidence and cannot directly demonstrate functional changes, causal relationships, or regulatory mechanisms. Supporting mechanism-level conclusions requires multi-sample replication, independent dataset validation, or experimental verification.
+
+---
+
+## Methods Summary
+
+All results above are based on the same preprocessed object. Manual layer annotations are used only for result evaluation and do not participate in unsupervised clustering or Tangram mapping.
+
+| Analysis step | Main settings |
+|---|---|
+| Data input | Sample 151673; `filtered_feature_bc_matrix.h5`; manual layer annotations |
+| QC | `min_counts >= 500`; `min_genes >= 200`; `pct_counts_mt < 30`; genes detected in ≥10 spots |
+| Preprocessing | `target_sum=10,000`; `log1p`; `seurat_v3` HVG; 3,000 HVGs |
+| PCA/kNN | 50 PCs; kNN uses first 17 PCs |
+| SVG | `Squidpy` Moran's I; 3,000 HVGs; 100 permutations |
+| Leiden | `resolution=0.62` |
+| SpaGCN | `beta=49`; `n_clusters=7` |
+| BayesSpace | `q=7`; `gamma=2`; `nrep=50,000` |
+| Tangram | Human MTG snRNA-seq reference; 10,743 nuclei; 24 subclasses; 1,279 marker genes; `mode='clusters'`; `rna_count_based`; 500 epochs |
+| Evaluation metrics | ARI; NMI; reference labels are manual layer annotations |
+
+: Main analysis parameter summary {#tbl-method-summary}
+
+---
+
+## Computational Environment
+
+The table below lists only software directly used or directly affecting main results in this project, excluding dependencies.
+
+| Software | Version | Purpose |
+|---|---:|---|
+| Python | 3.12.13 | Python analysis environment |
+| R | 4.5.3 | BayesSpace runtime |
+| `Scanpy` | 1.12.1 | Data loading, QC, normalization, PCA, Leiden |
+| `Squidpy` | 1.8.1 | Spatial neighbor graph, Moran's I, neighborhood analysis |
+| `SpaGCN` | 1.2.7 | Spatial clustering |
+| `BayesSpace` | 1.20.2 | Spatial clustering |
+| `Tangram` | 1.0.4 | snRNA-seq reference mapping |
+| `scikit-learn` | 1.8.0 | ARI, NMI, and other evaluation metrics |
+
+: Software versions directly relevant to this project {#tbl-software}
+
+---
+
+## References
+
+- Maynard KR, et al. (2021). Transcriptome-scale spatial gene expression in the human dorsolateral prefrontal cortex. *Nature Neuroscience*, 24, 425–436.
+- Zhao E, et al. (2021). Spatial transcriptomics at subspot resolution with BayesSpace. *Nature Biotechnology*, 39, 1375–1384.
+- Hu J, et al. (2021). SpaGCN: Integrating gene expression, spatial location and histology to identify spatial domains and spatially variable genes by graph convolutional network. *Nature Methods*, 18, 1342–1351.
+- Biancalani T, et al. (2021). Deep learning and alignment of spatially resolved single-cell transcriptomes with Tangram. *Nature Methods*, 18, 1352–1362.
+- Palla G, et al. (2022). Squidpy: a scalable framework for spatial omics analysis. *Nature Methods*, 19, 171–178.

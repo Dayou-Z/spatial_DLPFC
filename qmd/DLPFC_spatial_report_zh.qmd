@@ -1,0 +1,347 @@
+---
+title: "Human DLPFC Visium 空间转录组分析"
+author: "Dayou Zou"
+date: "2026-05-26"
+lang: zh-CN
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "显示代码"
+    fig-width: 10
+    fig-height: 7
+    theme: cosmo
+    smooth-scroll: true
+    embed-resources: true
+    lightbox: true
+execute:
+  enabled: false
+---
+
+```{=html}
+<style>
+table { font-size: 0.92em; }
+figcaption, .figure-caption {
+  font-size: 0.88em;
+  color: #555;
+  margin-top: 6px;
+}
+.quarto-figure img,
+p > img {
+  cursor: zoom-in;
+}
+</style>
+```
+
+## 引言
+
+### 数据背景
+
+人脑 dorsolateral prefrontal cortex（DLPFC）具有清晰的皮层层状结构。10x Visium 空间转录组数据在保留组织空间位置的同时测量 spot-level RNA 表达，因此适合用于检查空间表达模式、皮层层次相关 marker，以及不同空间聚类方法对层状结构的识别能力。
+
+本项目使用 Maynard et al. 发布的 human DLPFC Visium 数据，分析对象为 sample 151673。该样本包含人工标注的 Layer1–Layer6 和 white matter（WM），因此可以作为一个小型 benchmark，用于比较无监督聚类结果与专家层注释的一致性。
+
+### 项目目标
+
+本项目侧重分析流程和方法比较，分析包括五个部分：
+
+- 对 spot-level 表达矩阵进行 QC、归一化、HVG 选择、PCA 和表达图构建；
+- 使用 Moran’s I 识别空间可变基因，并检查已知皮层/WM marker 的空间分布；
+- 比较 Leiden、SpaGCN 和 BayesSpace 三种聚类结果与人工层注释的一致性；
+- 以 human MTG snRNA-seq 作为参考，通过 Tangram 反卷积估计主要细胞类型的空间趋势；
+- 使用 neighborhood enrichment、co-occurrence 和 Ripley's L 检查空间邻域关系。
+
+人工层注释不参与无监督聚类模型拟合，主要用于后续评估不同方法与皮层层状结构的一致性。Leiden resolution、SpaGCN `n_clusters` 和 BayesSpace `q` 的设置参考了 7 个专家标注区域，因此本报告的聚类比较应理解为固定目标类数附近的 benchmark，而不是完全无约束的模型选择。
+
+### 数据概况
+
+本分析使用 sample 151673 的公开 Space Ranger 输出矩阵和对应的人工层注释。原始读取后共有 3,639 个 spot 和 33,538 个基因；其中 3,611 个 spot 带有人工层注释。去除没有层注释的 spot 后，Layer1–Layer6 和 WM 均保留在分析中。
+
+| 区域 | spot 数 |
+|---|---:|
+| Layer1 | 273 |
+| Layer2 | 253 |
+| Layer3 | 989 |
+| Layer4 | 218 |
+| Layer5 | 673 |
+| Layer6 | 692 |
+| WM | 513 |
+| 合计 | **3,611** |
+
+: 人工层注释的 spot 组成 {#tbl-layer-counts}
+
+---
+
+## 质量控制
+
+质量控制在 spot 层面进行，主要检查 `total_counts`、`n_genes_by_counts` 和 `pct_counts_mt`。过滤前，带人工层注释的 spot 数为 3,611。过滤条件为 `min_counts >= 500`、`min_genes >= 200` 和 `pct_counts_mt < 30`；同时去除在少于 10 个 spot 中检出的基因。过滤后保留 3,601 个 spot 和 16,567 个基因。
+
+![主要 QC 指标的空间分布图](results/figures/02_B_qc.png){#fig-qc width="100%"}
+
+@fig-qc 展示三个主要 QC 指标的空间分布。Gray matter 区域整体显示较高的 UMI 和检测基因数；`pct_counts_mt` 未显示明显局部集中升高。本项目未使用多样本或外部 QC 对照，因此这里仅将 QC 结果作为后续分析的基本过滤依据。
+
+| 阶段 | spot 数 | 基因数 |
+|---|---:|---:|
+| 原始读取 | 3,639 | 33,538 |
+| 带人工层注释 | 3,611 | 33,538 |
+| QC 后 | **3,601** | **16,567** |
+
+: QC 前后的数据规模变化 {#tbl-qc}
+
+![人工层注释图](results/figures/01_ground_truth.png){#fig-ground-truth width="75%"}
+
+@fig-ground-truth 显示 sample 151673 的人工层注释。该注释用于后续聚类结果评估，不作为 Leiden、SpaGCN 或 BayesSpace 的训练标签。
+
+---
+
+## 空间表达结构
+
+### 预处理与表达聚类 baseline
+
+QC 后的矩阵使用 `target_sum=10,000` 做 library size normalization，并进行 `log1p` 转换。HVG 选择使用 `seurat_v3` 方法，保留 3,000 个高变基因。PCA 在 HVG 上计算 50 个主成分，后续 kNN 图构建使用前 17 个 PC。
+
+Leiden 聚类作为不显式使用空间坐标的表达聚类 baseline。这里的 baseline 用于和 SpaGCN、BayesSpace 这类空间方法对比，而不是作为最终层注释结果。
+
+| 步骤 | 设置 |
+|---|---|
+| Normalization | `target_sum=10,000` |
+| Transformation | `log1p` |
+| HVG | `seurat_v3`, `n_top_genes=3,000` |
+| PCA | 50 PCs |
+| kNN graph | `n_neighbors=15`, `n_pcs=17` |
+| Leiden baseline | `resolution=0.62` |
+
+: 预处理和表达聚类参数 {#tbl-preprocessing}
+
+### 空间可变基因
+
+本分析在 3,000 个 HVG 上计算 Moran’s I，并按 Moran’s I 从高到低排序。Moran’s I 用于衡量表达值的空间自相关；数值越高，说明该基因越倾向于在空间上形成局部聚集。统计显著性通过 100 次 permutation 估计。
+
+![Top 10 空间可变基因](results/figures/03_top10_svgs.png){#fig-top-svgs width="100%"}
+
+@fig-top-svgs 显示 Moran’s I 排名前 10 的空间可变基因。`MBP`、`PLP1`、`MOBP`、`MAG` 等 myelin/oligodendrocyte/WM 相关基因在 Moran’s I 排名中靠前，提示 WM 相关表达信号是本样本中较强的空间模式之一。这里的结果只能说明 RNA 表达在空间上的聚集趋势，不能直接解释为功能增强、功能缺失或调控机制变化。
+
+| 基因 | Moran’s I | FDR |
+|---|---:|---:|
+| `MBP` | 0.8075 | <0.0001 |
+| `PLP1` | 0.7019 | <0.0001 |
+| `SCGB2A2` | 0.7017 | <0.0001 |
+| `MOBP` | 0.6461 | <0.0001 |
+| `GFAP` | 0.6246 | <0.0001 |
+| `TF` | 0.5927 | <0.0001 |
+| `CNP` | 0.5717 | <0.0001 |
+| `CRYAB` | 0.5613 | <0.0001 |
+| `MAG` | 0.5459 | <0.0001 |
+| `PPP1R14A` | 0.5334 | <0.0001 |
+
+: Moran’s I 排名前 10 的基因 {#tbl-top-svg}
+
+
+### 已知 marker 检查
+
+为了检查空间表达结果是否与已知解剖结构方向一致，本项目查看了几个常用 marker。该检查属于结果合理性检查，不作为独立验证实验。
+
+![已知 marker 表达](results/figures/04_known_markers.png){#fig-known-markers width="100%"}
+
+@fig-known-markers 展示了 5 个参考 marker 的空间表达。`MBP` 和 `MOBP` 的高表达区域主要位于 WM；`SNAP25` 主要分布在皮层灰质区域。`PCP4` 在 Layer5 附近有表达，但空间自相关强度低于前几个 WM marker。`RELN` 在本分析中的 Moran’s I 排名较低。
+
+| Marker | 参考方向 | 空间表达观察 | Moran’s I rank |
+|---|---|---|---:|
+| `MBP` | WM / myelin / oligodendrocyte 相关 | WM 区域信号较强 | 1 |
+| `MOBP` | WM / myelin / oligodendrocyte 相关 | WM 区域信号较强 | 4 |
+| `SNAP25` | 神经元 / gray matter 相关 | gray matter 区域信号较强 | 20 |
+| `PCP4` | Layer5 相关 | 有一定 Layer5 相关趋势 | 67 |
+| `RELN` | Layer1 相关 | 空间自相关较弱 | 399 |
+
+: 已知 marker 的空间表达检查 {#tbl-known-markers}
+
+---
+
+## 空间聚类方法对比
+
+### 比较思路
+
+本项目比较三类无监督聚类结果：Leiden 只使用表达 PCA/kNN 图；SpaGCN 在表达信息之外加入空间坐标和 H&E 图像；BayesSpace 使用表达 PCA 和 Visium spot 邻接结构。聚类结果不使用人工层注释进行训练或拟合。人工层注释仅作为 reference label，用于计算 ARI 和 NMI。
+
+| 方法 | 输入信息 | 参数设置 | 本分析中的作用 |
+|---|---|---|---|
+| Leiden | 表达 PCA/kNN 图 | `resolution=0.62` | 无空间信息的基准 |
+| SpaGCN | 表达、空间坐标、H&E 图像 | `beta=49`, `n_clusters=7` | 空间图模型 |
+| BayesSpace | 表达 PCA 与 Visium 邻接结构 | `q=7`, `gamma=2`, `nrep=50,000` | 空间先验模型 |
+
+: 聚类方法设置 {#tbl-clustering-methods}
+
+### 空间分布对比
+
+![空间聚类结果比较](results/figures/05_clustering.png){#fig-clustering width="85%"}
+
+@fig-clustering 对比了人工层注释、Leiden、SpaGCN 和 BayesSpace 的空间分布。BayesSpace 在本样本中保留了较清晰的局部连续结构；Leiden 主要反映表达相似性，局部空间连续性较弱；SpaGCN 在当前参数下也没有超过 Leiden。
+
+### 定量评估
+
+| 方法 | ARI | NMI |
+|---|---:|---:|
+| Leiden | 0.3882 | 0.5009 |
+| SpaGCN | 0.3163 | 0.4593 |
+| BayesSpace | **0.5355** | **0.6729** |
+
+: 聚类结果与人工层注释的一致性 {#tbl-clustering-scores}
+
+在 sample 151673 和当前参数设置下，BayesSpace 的 ARI/NMI 最高。这个结果支持空间先验在该样本的层状结构识别中有帮助。SpaGCN 在本设置下低于 Leiden ，可能与参数选择、H&E 信息利用方式或平滑效应有关；本报告未做进一步验证，因此不把这一结果泛化为方法优劣结论。
+
+---
+
+## 参考映射与细胞类型空间趋势
+
+### 参考数据与 Tangram 设置
+
+Tangram 参考映射使用 human MTG snRNA-seq 数据。参考数据按 `subclass_label` 抽样，得到 10,743 个 nuclei，覆盖 24 个 subclass。该参考数据包含主要皮层神经元和胶质细胞类型；由于参考数据来自 MTG，而空间数据来自 DLPFC，脑区差异可能影响部分细胞类型得分的解释。
+
+Tangram 在 `mode='clusters'` 下运行，使用 1,279 个 marker genes，density prior 设置为 `rna_count_based`，训练 500 epochs。本报告将 Tangram 输出解释为细胞类型得分的相对空间趋势，不解释为直接细胞计数。
+
+| 项目 | 设置 |
+|---|---|
+| 参考数据 | human MTG snRNA-seq |
+| 注释列 | `subclass_label` |
+| 参考数据规模 | 10,743 nuclei |
+| Subclass 数 | 24 |
+| 训练基因 | 1,279 marker genes |
+| Tangram mode | `clusters` |
+| Density prior | `rna_count_based` |
+| Epochs | 500 |
+
+: Tangram 参考映射设置 {#tbl-tangram-params}
+
+### Tangram 空间趋势
+
+![Tangram 细胞类型得分图](results/figures/06_deconvolution.png){#fig-tangram-map width="85%"}
+
+@fig-tangram-map 展示 4 个 cell type score 的空间分布。`Oligodendrocyte` 的高分区域主要位于 WM，`L2/3 IT` 的高分区域主要位于浅层皮层。`L5 ET` 在中间层附近有分布，但不呈现明确的 Layer5 特异模式；`Astrocyte` 的分布相对分散。
+
+### 按专家层注释汇总
+
+![按专家层注释汇总的 Tangram 得分](results/figures/07_tangram_ct_by_layer_boxplot.png){#fig-tangram-box width="90%"}
+
+@fig-tangram-box 按人工层注释汇总 4 个 cell type score。`Oligodendrocyte` 在 WM 中最高，`L2/3 IT` 在 Layer2 和 Layer3 中较高。`L5 ET` 在 Layer3、Layer4 和 Layer5 均有分布，因此不写作明确的 Layer5 特异富集。
+
+| 细胞类型 | 层间分布 | 解释范围 |
+|---|---|---|
+| `Oligodendrocyte` | WM 中最高 | 与 WM 相关信号一致 |
+| `L2/3 IT` | Layer2 和 Layer3 中较高 | 与浅层兴奋性神经元分布方向一致 |
+| `L5 ET` | Layer3、Layer4 和 Layer5 均有分布 | 不写作明确 Layer5 特异富集 |
+| `Astrocyte` | 各层分布差异较小 | 不作为层特异结果解释 |
+
+: Tangram cell type score 的层间分布 {#tbl-tangram-interpretation}
+
+---
+
+## 空间邻域分析
+
+### Neighborhood enrichment
+
+Neighborhood enrichment 用于检查不同区域或 cluster 是否更倾向于与自身或相邻区域相连。这里分别对人工层注释和 BayesSpace cluster 计算邻域富集关系。
+
+::: {layout-ncol=2}
+
+![Ground truth neighborhood enrichment](results/figures/08_nhood_enrichment_gt.png){#fig-nhood-gt width="100%"}
+
+![BayesSpace neighborhood enrichment](results/figures/09_nhood_enrichment_bs.png){#fig-nhood-bs width="100%"}
+
+:::
+
+@fig-nhood-gt 和 @fig-nhood-bs 显示，人工层注释和 BayesSpace cluster 都呈现局部连续性。该结果可作为空间结构检查，但不能单独用于判断 BayesSpace 是否准确恢复层间边界。
+
+### Co-occurrence 与 Ripley's L
+
+Co-occurrence 分析用于观察指定层在不同距离尺度上的共现趋势。本项目查看了 Layer1、Layer3、Layer5 和 WM。
+
+::: {layout-ncol=2}
+
+![Layer1 co-occurrence](results/figures/co_occurrence_Layer1.png){.lightbox group="cooc" width="100%"}
+
+![Layer3 co-occurrence](results/figures/co_occurrence_Layer3.png){.lightbox group="cooc" width="100%"}
+
+![Layer5 co-occurrence](results/figures/co_occurrence_Layer5.png){.lightbox group="cooc" width="100%"}
+
+![WM co-occurrence](results/figures/co_occurrence_WM.png){.lightbox group="cooc" width="100%"}
+
+:::
+
+这些图用于补充检查层注释的空间组织。这里没有围绕共现曲线或 Ripley’s L 做额外统计检验，因此只作描述性结果使用。
+
+![Ripley’s L 曲线](results/figures/10_ripley_L.png){#fig-ripley width="80%"}
+
+@fig-ripley 展示不同层注释在不同距离尺度下的 Ripley’s L 曲线。曲线差异主要用于观察各层的空间聚集和范围差异，不单独作为聚类准确性的判断依据。
+
+---
+
+## 讨论
+
+### 主要观察
+
+本项目从 3,611 个带人工层注释的 spot 开始，QC 后保留 3,601 个 spot 和 16,567 个基因。空间可变基因分析显示，`MBP`、`PLP1`、`MOBP`、`MAG` 等 WM/少突胶质相关基因在 Moran’s I 排名中靠前，提示 WM 与 gray matter 的表达差异是该样本中较强的空间信号之一。
+
+### 方法层面的结果
+
+在 sample 151673、本参数和 ARI/NMI 指标下，BayesSpace 与人工层注释的一致性最高（ARI = 0.5355，NMI = 0.6729）。这一结果支持空间先验在本样本的层状结构识别中有帮助。
+
+Tangram 参考映射中，`Oligodendrocyte` 的高分区域主要位于 WM，`L2/3 IT` 的高分区域主要位于浅层皮层。由于 Tangram 输出是基于参考映射得到的相对得分，故无法将其解释为真实细胞比例或功能机制。
+
+### 局限性
+
+本项目是单样本、公开数据、特定参数下的分析。聚类方法比较使用人工层注释作为参考标签，并将目标类数设置在 7 个专家区域附近，因此结果不应泛化为所有 DLPFC 样本或所有空间聚类任务。
+
+RNA-level 表达趋势、Tangram 映射和 neighborhood 分析都属于计算层面的证据，不能直接说明功能改变、因果关系或调控机制。若要支持机制层面的结论，需要多样本复现、独立数据集验证或实验验证。
+
+---
+
+## 方法汇总
+
+前文结果均基于同一套预处理对象。人工层注释只用于结果评估，不参与无监督聚类或 Tangram 映射。
+
+| 分析步骤 | 主要设置 |
+|---|---|
+| 数据输入 | sample 151673；`filtered_feature_bc_matrix.h5`；人工层注释 |
+| QC | `min_counts >= 500`；`min_genes >= 200`；`pct_counts_mt < 30`；基因至少在 10 个 spot 中检出 |
+| 预处理 | `target_sum=10,000`；`log1p`；`seurat_v3` HVG；3,000 HVG |
+| PCA/kNN | 50 PCs；kNN 使用前 17 PCs |
+| SVG | `Squidpy` Moran’s I；3,000 HVG；100 次 permutation |
+| Leiden | `resolution=0.62` |
+| SpaGCN | `beta=49`；`n_clusters=7` |
+| BayesSpace | `q=7`；`gamma=2`；`nrep=50,000` |
+| Tangram | human MTG snRNA-seq reference；10,743 nuclei；24 subclasses；1,279 marker genes；`mode='clusters'`；`rna_count_based`；500 epochs |
+| 评估指标 | ARI；NMI；reference label 为人工层注释 |
+
+: 主要分析参数汇总 {#tbl-method-summary}
+
+---
+
+## 计算环境
+
+下表只列出本项目中直接使用或直接影响主要结果的软件，不列依赖项。
+
+| 软件 | 版本 | 用途 |
+|---|---:|---|
+| Python | 3.12.13 | Python 分析环境 |
+| R | 4.5.3 | BayesSpace 运行环境 |
+| `Scanpy` | 1.12.1 | 数据读取、QC、归一化、PCA、Leiden |
+| `Squidpy` | 1.8.1 | 空间邻居图、Moran’s I、邻域分析 |
+| `SpaGCN` | 1.2.7 | 空间聚类 |
+| `BayesSpace` | 1.20.2 | 空间聚类 |
+| `Tangram` | 1.0.4 | snRNA-seq 参考映射 |
+| `scikit-learn` | 1.8.0 | ARI、NMI 等评估指标 |
+
+: 本项目直接相关软件版本 {#tbl-software}
+
+---
+
+## 参考文献
+
+- Maynard KR, et al. (2021). Transcriptome-scale spatial gene expression in the human dorsolateral prefrontal cortex. *Nature Neuroscience*, 24, 425–436.
+- Zhao E, et al. (2021). Spatial transcriptomics at subspot resolution with BayesSpace. *Nature Biotechnology*, 39, 1375–1384.
+- Hu J, et al. (2021). SpaGCN: Integrating gene expression, spatial location and histology to identify spatial domains and spatially variable genes by graph convolutional network. *Nature Methods*, 18, 1342–1351.
+- Biancalani T, et al. (2021). Deep learning and alignment of spatially resolved single-cell transcriptomes with Tangram. *Nature Methods*, 18, 1352–1362.
+- Palla G, et al. (2022). Squidpy: a scalable framework for spatial omics analysis. *Nature Methods*, 19, 171–178.

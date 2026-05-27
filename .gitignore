@@ -1,0 +1,32 @@
+# Jupyter transient files
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.ipython/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# R and Quarto generated files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.quarto/
+*_cache/
+*_files/
+
+# Downloaded data
+/data/
+
+# Editors and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
