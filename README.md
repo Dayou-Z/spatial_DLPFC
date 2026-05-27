@@ -2,10 +2,10 @@
 
 本项目基于公开 human DLPFC 10x Visium 数据，分析 sample `151673`。该样本包含人工标注的 Layer1–Layer6 和 white matter（WM），适合用于空间表达模式检查和空间聚类方法比较。
 
-## 报告
+## 完整报告
 
-- 中文报告：`docs/report_zh.html`
-- English report：`docs/report_en.html`
+* [中文报告](https://dayou-z.github.io/spatial_DLPFC/DLPFC_spatial_report_zh.html)
+* [English report](https://dayou-z.github.io/spatial_DLPFC/DLPFC_spatial_report_en.html)
 
 ## 项目内容
 
